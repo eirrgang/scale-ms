@@ -4,6 +4,16 @@
 import os
 
 
+async def _rp_exec(task_input: 'radical.pilot.ComputeUnitDescription' = None):
+    raise NotImplementedError()
+
+
+async def _exec(*args, **kwargs):
+    """Implement scalems.exec for default Context."""
+    # Local staging not implemented. Immediately dispatch to RP Context.
+    return await _rp_exec()
+
+
 def exec(argv: 'Sequence', *,
          inputs: dict = None,
          outputs: dict = None,
@@ -77,4 +87,5 @@ def exec(argv: 'Sequence', *,
             >>> assert hasattr(result, 'exitcode')
 
     """
-    raise NotImplementedError()
+    # TODO: Implement TaskBuilder director.
+    return _exec()
