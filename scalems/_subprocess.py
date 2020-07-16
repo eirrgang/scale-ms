@@ -3,26 +3,46 @@
 
 import os
 
+import scalems.context as scalems_context
+
 
 async def _rp_exec(task_input: 'radical.pilot.ComputeUnitDescription' = None):
-    raise NotImplementedError()
+    raise NotImplementedError('_rp_exec not implemented')
+
+
+async def _local_exec(*args, **kwargs):
+    pass
 
 
 async def _exec(*args, **kwargs):
-    """Implement scalems.exec for default Context."""
+    """Produce the awaitable coroutine for scalems.executable.
+
+    When awaited, query the current context to negotiate dispatching. Note that the
+    built-in asyncio module acts like a LocalExecutor Context if and only if there
+    is not an active SCALE-MS Context. SCALE-MS Contexts
+    set the current context before awaiting.
+    """
     # Local staging not implemented. Immediately dispatch to RP Context.
-    return await _rp_exec()
+    context = scalems_context.get_context()
+    # TODO: dispatching
+    if isinstance(context, scalems_context.LocalExecutor):
+        # Note that we need a more sophisticated coroutine object than what we get directly from `async def`
+        # for command instances that can present output in multiple contexts or be transferred from one to another.
+        return await _local_exec()
+    elif isinstance(context, scalems_context.RPDispatcher):
+        return await _rp_exec()
+    raise NotImplementedError('Current context {} does not implement scalems.executable'.format(context))
 
 
-def exec(argv: 'Sequence', *,
-         inputs: dict = None,
-         outputs: dict = None,
-         environment: dict = None,
-         stdin=None,
-         stdout: str = None,
-         stderr: str = None,
-         resources: dict = None
-         ):
+def executable(argv: 'Sequence', *,
+               inputs: dict = None,
+               outputs: dict = None,
+               environment: dict = None,
+               stdin=None,
+               stdout: str = None,
+               stderr: str = None,
+               resources: dict = None
+               ):
     """Execute a command line program.
 
     Note:
@@ -81,7 +101,7 @@ def exec(argv: 'Sequence', *,
         user that the command always produces a file called ``exe.out``.
 
             >>> my_filename = "somefilename"
-            >>> result = scalems.exec(('exe', '--origin', 1.0, 2.0, 3.0, '-f', my_filename), inputs={'infile': my_filename}, outputs={'outfile': 'exe.out'})
+            >>> result = scalems.executable(('exe', '--origin', 1.0, 2.0, 3.0, '-f', my_filename), inputs={'infile': my_filename}, outputs={'outfile': 'exe.out'})
             >>> assert hasattr(result, 'file')
             >>> assert os.path.exists(result.file['outfile'].result())
             >>> assert hasattr(result, 'exitcode')
