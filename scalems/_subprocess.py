@@ -7,14 +7,27 @@ import scalems.context as scalems_context
 
 
 async def _rp_exec(task_input: 'radical.pilot.ComputeUnitDescription' = None):
-    raise NotImplementedError('_rp_exec not implemented')
+    context = scalems_context.get_context()
+    assert isinstance(context, scalems_context.RPDispatcher)
+    assert context.umgr is not None
+    task_description = {'executable': task_input['argv'][0],
+                        'cpu_processes': 1}
+    task = context.umgr.submit_units(context.rp.ComputeUnitDescription(task_description))
+    # task.wait() just hangs. Using umgr.wait_units() instead...
+    # task.wait()
+    context.umgr.wait_units()
+    assert task.exit_code == 0
 
 
-async def _local_exec(*args, **kwargs):
-    pass
+async def _local_exec(task_description: dict):
+    argv = task_description['argv']
+    assert isinstance(argv, (list, tuple))
+    assert len(argv) > 0
+    import subprocess
+    return subprocess.run(argv)
 
 
-async def _exec(*args, **kwargs):
+async def _exec(task_description: dict):
     """Produce the awaitable coroutine for scalems.executable.
 
     When awaited, query the current context to negotiate dispatching. Note that the
@@ -28,21 +41,13 @@ async def _exec(*args, **kwargs):
     if isinstance(context, scalems_context.LocalExecutor):
         # Note that we need a more sophisticated coroutine object than what we get directly from `async def`
         # for command instances that can present output in multiple contexts or be transferred from one to another.
-        return await _local_exec()
+        return await _local_exec(task_description)
     elif isinstance(context, scalems_context.RPDispatcher):
-        return await _rp_exec()
+        return await _rp_exec(task_description)
     raise NotImplementedError('Current context {} does not implement scalems.executable'.format(context))
 
 
-def executable(argv: 'Sequence', *,
-               inputs: dict = None,
-               outputs: dict = None,
-               environment: dict = None,
-               stdin=None,
-               stdout: str = None,
-               stderr: str = None,
-               resources: dict = None
-               ):
+def executable(*args, **kwargs):
     """Execute a command line program.
 
     Note:
@@ -107,5 +112,15 @@ def executable(argv: 'Sequence', *,
             >>> assert hasattr(result, 'exitcode')
 
     """
+    task_description = dict()
+    if len(args) > 0:
+        if 'argv' in kwargs or len(args) > 1:
+            raise ValueError('Unknown positional arguments provided.')
+        task_description['argv'] = args[0]
+    task_description.update(kwargs)
+    if not 'argv' in task_description:
+        raise ValueError('Missing required argument *argv*.')
+    if isinstance(task_description['argv'], (str, bytes)):
+        raise ValueError('argv should be a proper sequence type for the elements of an argv array.')
     # TODO: Implement TaskBuilder director.
-    return _exec()
+    return _exec(task_description)

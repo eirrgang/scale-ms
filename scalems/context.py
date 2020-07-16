@@ -8,6 +8,7 @@ This module allows the Python interpreter to track a global stack or tree
 structure to allow for simpler syntax and clean resource deallocation.
 """
 
+import os
 import warnings
 
 
@@ -37,10 +38,14 @@ class DefaultContext(AbstractContext):
 class LocalExecutor(AbstractContext):
     """Perform immediate local execution."""
     def run(self, coroutine):
+        """Allow context instance to provide the asyncio.run interface."""
+        assert self.__active
+        assert get_context() is self
+
         import asyncio
         from asyncio.coroutines import iscoroutine
         assert iscoroutine(coroutine)
-        assert get_context() is self
+
         return asyncio.run(coroutine)
 
     def __init__(self):
@@ -75,14 +80,47 @@ class LocalExecutor(AbstractContext):
 class RPDispatcher(AbstractContext):
     """Dispatch tasks through RADICAL Pilot."""
     def run(self, coroutine):
+        """Allow context instance to provide the asyncio.run interface."""
+        assert self.__active
+        assert get_context() is self
+
         import asyncio
         from asyncio.coroutines import iscoroutine
         assert iscoroutine(coroutine)
-        assert get_context() is self
+
         return asyncio.run(coroutine)
 
     def __init__(self):
+        import radical.pilot as rp
+        self.rp = rp
+        self.__rp_cfg = dict()
+        if not 'RADICAL_PILOT_DBURL' in os.environ:
+            raise RuntimeError('RADICAL Pilot environment is not available.')
+
+        resource = 'local.localhost'
+        # TODO: Find default config?
+        resource_config = {resource: {}}
+        resource_config[resource].update({
+            'project': None,
+            'queue': None,
+            'schema': None,
+            'cores': 1,
+            'gpus': 0
+        })
+        pilot_description = dict(resource=resource,
+                                 runtime=30,
+                                 exit_on_error=True,
+                                 project=resource_config[resource]['project'],
+                                 queue=resource_config[resource]['queue'],
+                                 cores=resource_config[resource]['cores'],
+                                 gpus=resource_config[resource]['gpus'])
+        self.resource_config = resource_config
+        self.pilot_description = pilot_description
+        self.session = None
+        self.umgr = None
+
         _context.append(self)
+        # TODO: Couple *active* to the status of self.session?
         self.__active = True
 
     def finalize(self):
@@ -91,6 +129,7 @@ class RPDispatcher(AbstractContext):
             if context is not self:
                 warnings.warn('Bad finalizer protocol may indicate race condition or leak: RPDispatcher is active, but not current.')
                 _context.append(context)
+            self.session.close()
             self.__active = False
         else:
             warnings.warn('finalize has been called more than once.')
@@ -102,9 +141,18 @@ class RPDispatcher(AbstractContext):
 
     def __enter__(self):
         assert get_context() is self
+        assert self.session is None
+        self.session = self.rp.Session()
+        pmgr = self.rp.PilotManager(session=self.session)
+        self.umgr = self.rp.UnitManager(session=self.session)
+        pilot = pmgr.submit_pilots(self.rp.ComputePilotDescription(self.pilot_description))
+        self.umgr.add_pilots(pilot)
+        # Note: We should have an active session now, ready to receive tasks, but
+        # no tasks have been submitted.
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        # self.umgr.wait_units()
         self.finalize()
         # Return False to indicate we have not handled any exceptions.
         return False
