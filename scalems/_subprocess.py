@@ -1,9 +1,39 @@
 """Commands executed as subprocesses.
 """
-
+import collections
+import json
 import os
+from pathlib import Path
+from dataclasses import dataclass
+from typing import _T_co, Any, Generator, Mapping
 
 import scalems.context as scalems_context
+
+
+class Subprocess:
+    """Task object returned by scalems.executable()."""
+
+
+class SubprocessInput:
+    """Dataclass describing the inputs to Subprocess."""
+
+
+@dataclass
+class SubprocessResult:
+    """Dataclass describing the outputs of Subprocess.
+
+    Hypothetical class for Task result, if we want a separate class for the post-execution state.
+    """
+    exitcode: int
+    stdout: Path
+    stderr: Path
+    file: Mapping[str, Path]
+    # Design note: We will want to consolidate the expression of outputs to allow
+    # automated generation of Futures for coroutine attribute access. Data Descriptor
+    # objects for class fields seem like a likely underlying mechanism that could
+    # be reused for both Coroutine and Result classes. But we may choose to generate
+    # the result type, itself, from the coroutine definition, if we can make sensible
+    # static type checking work.
 
 
 async def _rp_exec(task_input: 'radical.pilot.ComputeUnitDescription' = None):
@@ -19,7 +49,7 @@ async def _rp_exec(task_input: 'radical.pilot.ComputeUnitDescription' = None):
     assert task.exit_code == 0
 
 
-async def _local_exec(task_description: dict):
+def _local_exec(task_description: dict):
     argv = task_description['argv']
     assert isinstance(argv, (list, tuple))
     assert len(argv) > 0
@@ -27,27 +57,129 @@ async def _local_exec(task_description: dict):
     return subprocess.run(argv)
 
 
-async def _exec(task_description: dict):
-    """Produce the awaitable coroutine for scalems.executable.
+def make_cu(context, task_input):
+    """InputResource factory for implementations based on standard RP ComputeUnit.
 
-    When awaited, query the current context to negotiate dispatching. Note that the
-    built-in asyncio module acts like a LocalExecutor Context if and only if there
-    is not an active SCALE-MS Context. SCALE-MS Contexts
-    set the current context before awaiting.
+    .. todo:: How can we defer run time argument realization? Is this what the RP "kernel" idea is for?
     """
-    # Local staging not implemented. Immediately dispatch to RP Context.
-    context = scalems_context.get_context()
-    # TODO: dispatching
-    if isinstance(context, scalems_context.LocalExecutor):
-        # Note that we need a more sophisticated coroutine object than what we get directly from `async def`
-        # for command instances that can present output in multiple contexts or be transferred from one to another.
-        return await _local_exec(task_description)
-    elif isinstance(context, scalems_context.RPDispatcher):
-        return await _rp_exec(task_description)
-    raise NotImplementedError('Current context {} does not implement scalems.executable'.format(context))
+    from scalems.context.radical import RPContextManager
+    if not isinstance(context, RPContextManager):
+        raise ValueError('This resource factory is only valid for RADICAL Pilot workflow contexts.')
+    task_description = {'executable': task_input['argv'][0],
+                        'cpu_processes': 1}
+    return context.rp.ComputeUnitDescription(task_description)
 
 
-def executable(*args, **kwargs):
+def make_subprocess_args(context, task_input):
+    """InputResource factory for *subprocess* based implementations.
+    """
+    # subprocess.Popen and asyncio.create_subprocess_exec have approximately compatible arguments.
+    from scalems.context.local import AbstractLocalContext
+    if not isinstance(context, AbstractLocalContext):
+        raise ValueError('This resource factory is for subprocess-based execution per scalems.context.local')
+    # TODO: await the arguments.
+    args = list([arg for arg in task_input['argv']])
+
+    # TODO: stream based input with PIPE.
+    kwargs = {
+        'stdin': None,
+        'stdout': None,
+        'stderr': None,
+        'env': None
+    }
+    return {'args': args, 'kwargs': kwargs}
+
+
+def local_runner(session, arguments):
+    """Create and execute a subprocess task in the context."""
+    # Get callable.
+    process = session.wait(session.subprocess_runner(*arguments['args'], **arguments['kwargs']))
+    runner = process.wait
+    # Call callable.
+    # TODO: We should yield in here, somehow, to allow cancellation of the subprocess.
+    # Suggest splitting runner into separate launch/resolve phases or representing this
+    # long-running function as a stateful object. Note: this is properly a run-time Task.
+    # TODO: Split current Context implementations into two components: run time and dispatcher?
+    # Or is that just the Context / Session division?
+    # Run time needs to allow for task management (asynchronous where applicable) and can
+    # be confined to an environment with a running event loop (where applicable) and/or
+    # active executor.
+    # Dispatcher would be able to insulate callers / collaborators from event loop details.
+    session.wait(runner())
+
+    result = SubprocessResult()
+    result._exitcode = process.returncode
+    assert result.exitcode() is not None
+    return result
+
+
+class SubprocessCoroutine(collections.abc.Awaitable):
+    """ScaleMS Coroutine object for scalems.executable tasks."""
+    def __init__(self, *, context, description: dict = None):
+        self.serialized_description = json.dumps(description)
+        self._result = None  # type: SubprocessResult
+
+    #
+    # def run_in_context(self, context):
+    #     # TODO: dispatching
+    #     from scalems.context.local import LocalExecutor
+    #     if isinstance(context, LocalExecutor):
+    #         # Note that we need a more sophisticated coroutine object than what we get directly from `async def`
+    #         # for command instances that can present output in multiple contexts or be transferred from one to another.
+    #         task_input = json.loads(self.serialized_description)
+    #         arguments = make_subprocess_args(context, task_input=task_input)
+    #         if hasattr(context, 'subprocess_runner'):
+    #             return context.subprocess_runner(*arguments['args'], **arguments['kwargs'])
+    #     elif isinstance(context, scalems_context.RPDispatcher):
+    #         return await _rp_exec(task_description)
+    #     raise NotImplementedError('Current context {} does not implement scalems.executable'.format(context))
+
+    def __await__(self) -> Generator[Any, None, SubprocessResult]:
+        """Implements the asyncio protocol for a coroutine object.
+
+        When awaited, query the current context to negotiate dispatching. Note that the
+        built-in asyncio module acts like a LocalExecutor Context if and only if there
+        is not an active SCALE-MS Context. SCALE-MS Contexts
+        set the current context before awaiting.
+        """
+        context = self.context
+        # Local staging not implemented. Immediately dispatch to RP Context.
+        if context is None:
+            context = scalems_context.get_context()
+        # TODO: dispatching
+        if isinstance(context, scalems_context.LocalExecutor):
+            # Note that we need a more sophisticated coroutine object than what we get directly from `async def`
+            # for command instances that can present output in multiple contexts or be transferred from one to another.
+            self._result = await _local_exec(task_description)
+        elif isinstance(context, scalems_context.RPDispatcher):
+            self._result = await _rp_exec(task_description)
+        else:
+            raise NotImplementedError('Current context {} does not implement scalems.executable'.format(context))
+
+        # Allow this function to be a generator function, fulfilling the awaitable protocol.
+        yield self
+        # Note that the items yielded are not particularly useful, but the position of the
+        # yield expression(s) is potentially useful for debugging or multitasking. Depending
+        # on the implementation of the event loop, multiple yields may allow a way to avoid
+        # deadlocks. For instance, we may choose to yield at each iteration of a loop to
+        # provide or read PIPE-based stdin or stdout. `await` should accomplish the same thing,
+        # but the generator protocol may improve debugging and generality.
+        # The point of "yield" is more interesting when we use "yield" as an expression in the
+        # yielding code, which allows values to be passed in to the coroutine at the evaluation
+        # of the yield expression (e.g. https://docs.python.org/3/howto/functional.html#passing-values-into-a-generator
+        # but not that the coroutine protocol is slightly different, per https://www.python.org/dev/peps/pep-0492/)
+        # For instance, this could be a mechanism for nesting event loops or dispatching contexts
+        # while maintaining a heart-beat or other command-channel-like wrapper.
+
+        if not isinstance(self._result, SubprocessResult):
+            raise RuntimeError('Result was not delivered!')
+        return self._result
+
+
+# TODO: overload (single-dispatch function) for whether first arg is SubprocessInput or not.
+# TODO: Consider what sorts of Generic typing would be appropriate. Something like
+#       def executable(inputs: Subprocess.Input[SourceContextVar], *args, context: TargetContextVar = DefaultContext, **kwargs) -> TargetContextVar.Future[Subprocess.Result]
+def executable(inputs: SubprocessInput, *args, **kwargs) -> Subprocess:
     """Execute a command line program.
 
     Note:
@@ -56,6 +188,8 @@ def executable(*args, **kwargs):
 
     Configure an executable to run in one (or more) subprocess(es).
     Executes when run in an execution Context, as part of a work graph.
+    Process environment and execution mechanism depends on the execution environment,
+    but is likely similar to (or implemented in terms of) the POSIX execvp system call.
 
     Shell processing of *argv* is disabled to improve determinism.
     This means that shell expansions such as environment variables, globbing (``*``),
@@ -77,6 +211,8 @@ def executable(*args, **kwargs):
          resources: Name additional required resources, such as an MPI environment.
 
     .. todo:: Support POSIX sigaction / IPC traps?
+
+    .. todo:: Consider dataclasses.dataclass types to replace reusable/composable function signatures.
 
     Program arguments are iteratively added to the command line with standard Python
     iteration, so you should use a tuple or list even if you have only one parameter.
@@ -113,14 +249,24 @@ def executable(*args, **kwargs):
 
     """
     task_description = dict()
+    # TODO: Normalized argument handling.
     if len(args) > 0:
         if 'argv' in kwargs or len(args) > 1:
             raise ValueError('Unknown positional arguments provided.')
-        task_description['argv'] = args[0]
+        task_description['argv'] = args
     task_description.update(kwargs)
     if not 'argv' in task_description:
         raise ValueError('Missing required argument *argv*.')
+
+    # TODO: typing helpers
     if isinstance(task_description['argv'], (str, bytes)):
         raise ValueError('argv should be a proper sequence type for the elements of an argv array.')
+
+    for key in ('outputs', 'inputs', 'environment', 'stdin', 'stdout', 'stderr', 'resources'):
+        if key in task_description:
+            raise ValueError('Unsupported key word argument: {}'.format(key))
+
     # TODO: Implement TaskBuilder director.
-    return _exec(task_description)
+    awaitable = SubprocessCoroutine(task_description)
+
+    return awaitable
