@@ -436,6 +436,8 @@ class PythonEncoder:
     def register(cls, dtype: typing.Type[DispatchT], handler: typing.Callable[[DispatchT], BaseEncodable]):
         # Note that we don't expect references to bound methods to extend the life of the type.
         # TODO: confirm this assumption in a unit test.
+        if not isinstance(dtype, type):
+            raise TypeError('We use `isinstance(obj, dtype)` for dispatching, so *dtype* must be a `type` object.')
         if dtype in cls._dispatchers:
             raise ProtocolError('Encodable type appears to be registered already.')
         cls._dispatchers[dtype] = handler
@@ -502,6 +504,7 @@ class PythonDecoder:
     _dispatchers: typing.MutableMapping[
             TypeIdentifier,
             typing.Callable] = dict()
+    # Depending on what the callables are, we may want a weakref.WeakValueDictionary() or we may not!
 
     @classmethod
     def register(cls, typeid: TypeIdentifier, handler: typing.Callable):
@@ -589,15 +592,48 @@ class PythonDecoder:
 ST = typing.TypeVar('ST')
 
 
-class BasicSerializable:
+class TypeDataDescriptor:
+    """Implement the *dtype* attribute for the owning class."""
+    @property
+    def attr_name(self):
+        return '_' + self.name
+
+    def __init__(self, name: str = None, base_type: TypeIdentifier = None):
+        self.name = name
+        self.base = base_type
+
+    def __set_name__(self, owner, name):
+        # Called by type.__new__ during class creation to allow customization.
+        self.name = name
+        if hasattr(owner, self.attr_name):
+            raise ProtocolError(f'No storage for data descriptor. {repr(owner)} already has an attribute named {self.attr_name}.')
+
+    def __get__(self, instance, owner) -> typing.Union['TypeDataDescriptor', TypeIdentifier]:
+        # Note that instance==None when called through the *owner* (as a class attribute).
+        if instance is None:
+            return self.base
+        else:
+            return getattr(instance, self.attr_name, self.base)
+
+
+class BasicSerializable(UnboundObject):
     __label: typing.Optional[str] = None
     __identity: Identifier
-    _dtype: TypeIdentifier
+    __dtype: TypeIdentifier
     _shape: Shape
     data: collections.abc.Container
 
     _data_encoder: typing.Callable
     _data_decoder: typing.Callable
+
+    base_type = TypeDataDescriptor(base_type=TypeIdentifier(('scalems', 'BasicSerializable')))
+
+    def dtype(self) -> TypeIdentifier:
+        # Part of the decision of whether to use a property or a method
+        # is whether we want to normalize on dtype as an instance or class characteristic.
+        # Initially, we are using inheritance to get registration behavior through metaprogramming.
+        # In other words, the real question may be how we want to handle registration.
+        return self.base_type
 
     def __init__(self, data, *, dtype, shape=(1,), label=None, identity=None):
         if identity is None:
@@ -607,7 +643,7 @@ class BasicSerializable:
             # TODO: Validate identity
             self.__identity = identity
         self.__label = str(label)
-        self._dtype = TypeIdentifier.copy_from(dtype)
+        self.base_type = TypeIdentifier.copy_from(dtype)
         self._shape = Shape(shape)
         # TODO: validate data dtype and shape.
         # TODO: Ensure data is read-only.
@@ -619,9 +655,6 @@ class BasicSerializable:
 
     def label(self):
         return str(self.__label)
-
-    def dtype(self):
-        return TypeIdentifier.copy_from(self._dtype)
 
     def shape(self):
         return Shape(self._shape)
@@ -654,16 +687,20 @@ class BasicSerializable:
                    )
 
     def __init_subclass__(cls, **kwargs):
-        dtype = getattr(cls, 'dtype', None)
-        if dtype is not None:
-            encoder = getattr(cls, 'encode', None)
-            if encoder is None:
-                encoder = BasicSerializable.encode
-            PythonEncoder.register(dtype, encoder)
-            decoder = getattr(cls, 'decode', None)
-            if decoder is None:
-                decoder = BasicSerializable.decode
-            PythonDecoder.register(dtype, decoder)
+        # This does not allow us to retain the identity of *cls* for when we call the helpers...
+        encoder = getattr(cls, 'encode', BasicSerializable.encode)
+        PythonEncoder.register(cls, encoder)
+
+        if hasattr(cls, 'decode') and callable(cls.decode):
+            _decoder = weakref.WeakMethod(cls.decode)
+
+            def _decode(encoded: dict):
+                decoder = _decoder()
+                if decoder is None:
+                    raise ProtocolError('Decoding a type that has already been de-registered.')
+                return decoder(encoded)
+            PythonDecoder.register(cls.base_type, _decode)
+
         super().__init_subclass__(**kwargs)
 
 
@@ -794,8 +831,11 @@ def test_basic_decoding():
         'data': ['spam', 'eggs', 'spam', 'spam']
     }
     instance = decode(encoded)
-    assert instance.shape() == Shape((1,))
-    assert instance.dtype() == TypeIdentifier(('test', 'Spam'))
+    assert type(instance) is BasicSerializable
+    shape_ref = Shape((1,))
+    assert instance.shape() == shape_ref
+    type_ref = TypeIdentifier(('test', 'Spam'))
+    assert instance.dtype() == type_ref
 
     # Test basic encoding, too.
     assert tuple(instance.encode()['data']) == tuple(encoded['data'])
@@ -805,23 +845,40 @@ def test_basic_decoding():
 
 def test_encoder_registration():
     # Test low-level registration details for object representation round trip.
-    class SpamInstance(BasicSerializable):
-        def encode(self):
-            representation = {
-                'label': self.label,
-                'identity': self.identity,
-                'type': ('test', 'Spam'),
-                'shape': self.shape(),
-                'data': self._data  # TODO: register data encoder.
-            }
-            return representation
-
-        @classmethod
-        def decode(cls: typing.Type[ST], encoded: dict) -> ST:
-            ...
-
+    # There were some to-dos of things we should check...
+    ...
 
     # Test framework for type creation and automatic registration.
+    class SpamInstance(BasicSerializable):
+        # TODO: override the *dtype* data descriptor in cls.
+        # __init_subclass__ gets called too late to overwrite the data descriptor
+        # from the parent class. We would have to do that with a metaclass.
+        base_type = TypeDataDescriptor(base_type=TypeIdentifier(('test', 'Spam')))
+
+    instance = SpamInstance(label='my_spam',
+                            identity=uuid.uuid4().hex,
+                            dtype=['test', 'Spam'],
+                            shape=(1,),
+                            data=['spam', 'eggs', 'spam', 'spam']
+                            )
+    assert not type(instance) is BasicSerializable
+
+    encoded = encode(instance)
+    decoded = decode(encoded)
+    assert not type(decoded) is BasicSerializable
+    assert isinstance(decoded, SpamInstance)
+
+    del instance
+    del decoded
+    del SpamInstance
+    import gc
+    gc.collect()
+    with pytest.raises(ProtocolError):
+        decode(encoded)
+
+    decode.unregister(TypeIdentifier(('test', 'Spam')))
+    decoded = decode(encoded)
+    assert type(decoded) is BasicSerializable
 
 
 def test_serialization():
