@@ -593,47 +593,107 @@ ST = typing.TypeVar('ST')
 
 
 class TypeDataDescriptor:
-    """Implement the *dtype* attribute for the owning class."""
+    """Implement the *dtype* attribute.
+
+    The TypeDataDescriptor object is instantiated to implement the
+    BasicSerializable.base_type dynamic attribute.
+
+    Attributes:
+        name: Name of the attribute provided by the data descriptor.
+        base: TypeIdentifier associated with the Python class.
+        attr_name: the name of the instance data member used by this descriptor for storage.
+
+    *name* can be provided at initialization, but is overridden during class
+    definition when TypeDataDescriptor is used in the usual way (as a data descriptor
+    instantiated during class definition).
+
+    At least for now, *name* is required to be ``_dtype``.
+
+    *attr_name* is derived from *name* at access time. For now, it is always
+    ``__dtype``.
+
+    Instances of the Python class may have their own *dtype*. For the SCALE-MS
+    data model, TypeIdentifier is an instance attribute rather than a class attribute.
+    If an instance did not set ``self.__dtype`` at initialization, the descriptor
+    returns *base* for the instance's class.
+
+    *base* is the (default) SCALEMS TypeIdentifier for the class using the descriptor.
+    For a class using the data descriptor, *base* is inferred from the class
+    __module__ and __qualname__ attributes, if not provided through the class definition.
+
+    A single data descriptor instance is used for a class hierarchy to encapsulate
+    the meta-programming for UnboundObject classes without invoking Python metaclass
+    arcana (so far). At module import, a TypeDataDescriptor is instantiated for
+    BasicSerializable._dtype. The data descriptor instance keeps a weakref.WeakKeyDict
+    mapping type objects (classes) to the TypeDataDescriptor details for classes
+    other than BasicSerializable. (BasicSerializable._dtype always produces
+    ``TypeIdentifier(('scalems', 'BasicSerializable'))``.)
+    The mapping is updated whenever BasicSerializable is subclassed.
+    """
     @property
     def attr_name(self):
-        return '_' + self.name
+        return '_owner' + self.name
 
     def __init__(self, name: str = None, base_type: TypeIdentifier = None):
+        # Note that the descriptor instance is not fully initialized until it is
+        # further processed during the creation of the owning class.
         self.name = name
-        self.base = base_type
+        if base_type is not None:
+            self._original_owner_type = TypeIdentifier.copy_from(base_type)
+        else:
+            self._original_owner_type = None
+        self.base = weakref.WeakKeyDictionary()
 
     def __set_name__(self, owner, name):
         # Called by type.__new__ during class creation to allow customization.
+        # Let's start with strict naming requirements for early implementations,
+        # and explicitly forbid multiple instances of this data descriptor implementation
+        # in the same class.
+        # Note that __set_name__ is only called at most once, by type.__new__
+        # for a class definition in which the descriptor is instantiated.
+        # In other words, __set_name__ is called for the base class, only, and
+        # __init_subclass__ is called for derived classes, only.
+        if name != '_dtype':
+            raise ProtocolError('TypeDataDescriptor has a strict naming protocol. Only use for a `_dtype` attribute.')
         self.name = name
         if hasattr(owner, self.attr_name):
-            raise ProtocolError(f'No storage for data descriptor. {repr(owner)} already has an attribute named {self.attr_name}.')
+            raise ProtocolError(
+                f'No storage for data descriptor. {repr(owner)} already has an attribute named {self.attr_name}.')
+
+        assert owner not in self.base
+        assert len(self.base) == 0
+        logger.debug(f'Initializing base class {owner} ownership of TypeDataDescriptor.')
+        self._original_owner = weakref.ref(owner)
+        if self._original_owner_type is None:
+            self._original_owner_type = TypeIdentifier.copy_from([str(owner.__module__)] + owner.__qualname__.split('.'))
+        self.base[owner] = TypeIdentifier.copy_from(self._original_owner_type)
 
     def __get__(self, instance, owner) -> typing.Union['TypeDataDescriptor', TypeIdentifier]:
         # Note that instance==None when called through the *owner* (as a class attribute).
         if instance is None:
-            return self.base
-        else:
-            return getattr(instance, self.attr_name, self.base)
+            if owner is self._original_owner():
+                return self
+            return self.base[owner]
+        return getattr(instance, self.attr_name, self.base[owner])
 
 
 class BasicSerializable(UnboundObject):
     __label: typing.Optional[str] = None
     __identity: Identifier
-    __dtype: TypeIdentifier
     _shape: Shape
     data: collections.abc.Container
 
     _data_encoder: typing.Callable
     _data_decoder: typing.Callable
 
-    base_type = TypeDataDescriptor(base_type=TypeIdentifier(('scalems', 'BasicSerializable')))
+    _dtype = TypeDataDescriptor(base_type=TypeIdentifier(('scalems', 'BasicSerializable')))
 
     def dtype(self) -> TypeIdentifier:
         # Part of the decision of whether to use a property or a method
         # is whether we want to normalize on dtype as an instance or class characteristic.
         # Initially, we are using inheritance to get registration behavior through metaprogramming.
         # In other words, the real question may be how we want to handle registration.
-        return self.base_type
+        return self._dtype
 
     def __init__(self, data, *, dtype, shape=(1,), label=None, identity=None):
         if identity is None:
@@ -643,7 +703,10 @@ class BasicSerializable(UnboundObject):
             # TODO: Validate identity
             self.__identity = identity
         self.__label = str(label)
-        self.base_type = TypeIdentifier.copy_from(dtype)
+
+        attrname = BasicSerializable._dtype.attr_name
+        setattr(self, attrname, TypeIdentifier.copy_from(dtype))
+
         self._shape = Shape(shape)
         # TODO: validate data dtype and shape.
         # TODO: Ensure data is read-only.
@@ -687,6 +750,18 @@ class BasicSerializable(UnboundObject):
                    )
 
     def __init_subclass__(cls, **kwargs):
+        assert cls is not BasicSerializable
+        base = kwargs.pop('base_type', None)
+        if base is not None:
+            typeid = TypeIdentifier.copy_from(base)
+        else:
+            typeid = [str(cls.__module__)] + cls.__qualname__.split('.')
+        registry = BasicSerializable._dtype.base
+        if cls in registry and registry[cls] is not None:
+            # This may be a customization or extension point in the future, but not today...
+            raise ProtocolError('Subclassing BasicSerializable for a Type that is already registered.')
+        BasicSerializable._dtype.base[cls] = typeid
+
         # This does not allow us to retain the identity of *cls* for when we call the helpers...
         encoder = getattr(cls, 'encode', BasicSerializable.encode)
         PythonEncoder.register(cls, encoder)
@@ -699,7 +774,7 @@ class BasicSerializable(UnboundObject):
                 if decoder is None:
                     raise ProtocolError('Decoding a type that has already been de-registered.')
                 return decoder(encoded)
-            PythonDecoder.register(cls.base_type, _decode)
+            PythonDecoder.register(cls._dtype, _decode)
 
         super().__init_subclass__(**kwargs)
 
@@ -835,7 +910,8 @@ def test_basic_decoding():
     shape_ref = Shape((1,))
     assert instance.shape() == shape_ref
     type_ref = TypeIdentifier(('test', 'Spam'))
-    assert instance.dtype() == type_ref
+    instance_type = instance.dtype()
+    assert instance_type == type_ref
 
     # Test basic encoding, too.
     assert tuple(instance.encode()['data']) == tuple(encoded['data'])
@@ -849,11 +925,8 @@ def test_encoder_registration():
     ...
 
     # Test framework for type creation and automatic registration.
-    class SpamInstance(BasicSerializable):
-        # TODO: override the *dtype* data descriptor in cls.
-        # __init_subclass__ gets called too late to overwrite the data descriptor
-        # from the parent class. We would have to do that with a metaclass.
-        base_type = TypeDataDescriptor(base_type=TypeIdentifier(('test', 'Spam')))
+    class SpamInstance(BasicSerializable, base_type=('test', 'Spam')):
+        ...
 
     instance = SpamInstance(label='my_spam',
                             identity=uuid.uuid4().hex,
