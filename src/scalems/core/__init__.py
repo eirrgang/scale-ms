@@ -9,14 +9,12 @@ middleware interfaces, and execution run time support.
 __all__ = ['app', 'run', 'wait', 'ScriptEntryPoint']
 
 import abc
-import contextlib
 import functools
 import logging
 import typing
 import warnings
 
 import scalems.core.exceptions as exceptions
-from scalems.context import next_monotonic_integer
 from scalems.context import scope
 
 from ..context import get_context
@@ -24,7 +22,6 @@ from ..context import WorkflowManager
 
 logger = logging.getLogger(__name__)
 logger.debug('Importing {}'.format(__name__))
-
 
 
 # TODO: Helpers and optimizations for fused operations, "partial" operations.
@@ -74,6 +71,28 @@ ResultType = typing.TypeVar('ResultType')
 class WorkflowObject(typing.Generic[ResultType]): ...
 
 
+# class Callable(typing.Protocol):
+#     """This protocol describes the required function signature for a SCALE-MS command."""
+#
+#     def __call__(self):
+#         ...
+#
+#
+# # TODO: Explain Command.
+# Command = typing.NewType('Command', object)
+#
+#
+# def command(obj: Callable, *, input_type, result_type):
+#     """Get a decorator for ScaleMS Command definitions.
+#
+#     A ScaleMS command minimally consists of an input specification, and output
+#     specification, and a callable.
+#     """
+#     def decorator(cls) -> Command:
+#         ...
+#     return decorator
+
+
 def _unpack_work(ref: dict):
     """Temporary handler for ad hoc dict-based input.
 
@@ -105,7 +124,7 @@ def _unpack_work(ref: dict):
         bound_input = SubprocessInput(**kwargs)
         item = Subprocess(input=bound_input)
         yield item
-        return item.uid()
+        return item.identity()
     else:
         # If record bundles dependencies, identify them and yield them first.
         try:
@@ -117,18 +136,18 @@ def _unpack_work(ref: dict):
             dependency: typing.Optional[bytes] = yield from _unpack_work(depends)
         else:
             dependency = None
-        if 'uid' not in ref:
-            ref['uid'] = next_monotonic_integer().to_bytes(32, 'big')
-        uid: bytes = ref['uid']
+        if 'identity' not in ref:
+            ref['identity'] = next_monotonic_integer().to_bytes(32, 'big')
+        identity: bytes = ref['identity']
         if dependency is not None:
             logger.debug('Replacing explicit input in {} with reference: {}'.format(
-                uid.hex(),
+                identity.hex(),
                 dependency.hex()
             ))
             ref['message'][command]['input'] = dependency
         # Then yield the dependent item.
         yield ref
-        return uid
+        return identity
 
 
 @functools.singledispatch
@@ -147,7 +166,7 @@ def _(ref: dict, *, manager):
     for item in _unpack_work(ref):
         view = manager.add_item(item)
         logger.debug('Added {}: {}'.format(
-            view.uid().hex(),
+            view.identity().hex(),
             str(item)))
     # TODO: If dispatcher is running, wait for the results.
     # TODO: If dispatcher is not running, can we trigger it?

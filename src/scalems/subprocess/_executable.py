@@ -20,50 +20,48 @@ __all__ = ['executable', 'Subprocess', 'SubprocessInput', 'SubprocessResult']
 import dataclasses
 import json
 import logging
+import os
 import typing
 from pathlib import Path # We probably need a scalems abstraction for Path.
 
-from scalems.context import next_monotonic_integer
 from scalems.core.support.serialization import encode
 
-from scalems.core.exceptions import InternalError, MissingImplementationError, ProtocolError
+from ..core.datamodel.interfaces import Reference
+
+from ..core.exceptions import InternalError, MissingImplementationError, ProtocolError
 from .. import context as _context
 
 logger = logging.getLogger(__name__)
 logger.debug('Importing {}'.format(__name__))
 
 
-class OutputFile(dict):
-    """Placeholder for output files.
-
-    The initial implementation of OutputFile does not provide access to the
-    created output file.
-
-    The actual filename is managed by SCALE-MS to avoid namespace collisions.
-
-    Arguments:
-        label (str): Optional user-friendly identifier for locating a reference in the managed workflow.
-        suffix (str): Optional filename suffix for the generated filename.
-
-    In a future implementation, we may allow instances of OutputFile to transform
-    into workflow references that are dependent on the task under construction.
-    """
-    def __init__(self, label=None, suffix=''):
-        super().__init__()
-        self['label'] = label
-        self['suffix'] = suffix
-
-    @property
-    def label(self):
-        return self.get('label', None)
-
-    @property
-    def suffix(self):
-        return self.get('suffix', '')
-
-
 # TODO: what is the mechanism for registering a command implementation in a new Context?
 # TODO: What is the relationship between the command factory and the command type? Which parts need to be importable?
+
+
+class ConcreteExecutableInput(typing.Protocol):
+    """Not for use. Temporarily define a type for comparison."""
+    argv: typing.Sequence[typing.Union[str, Reference]]
+    inputs: typing.Sequence[Path] = dataclasses.field(default_factory=tuple)
+    outputs: typing.Mapping[str, Path] = dataclasses.field(default_factory=dict)
+    stdin: typing.Iterable[str] = ()
+    environment: typing.Mapping[str, typing.Union[str, None]] = dataclasses.field(default_factory=dict)
+    # For now, let's just always enable stdout/stderr
+    stdout: Path = dataclasses.field(default=Path('stdout'))
+    stderr: Path = dataclasses.field(default=Path('stderr'))
+    resources: typing.Mapping[str, typing.Any] = dataclasses.field(default_factory=dict)
+
+
+class Executable:
+    argv: typing.Sequence[str]
+    inputs: typing.Mapping[str, Path] = dataclasses.field(default_factory=dict)
+    outputs: typing.Mapping[str, Path] = dataclasses.field(default_factory=dict)
+    stdin: typing.Iterable[str] = ()
+    environment: typing.Mapping[str, typing.Union[str, None]] = dataclasses.field(default_factory=dict)
+    # For now, let's just always enable stdout/stderr
+    stdout: Path = dataclasses.field(default=Path('stdout'))
+    stderr: Path = dataclasses.field(default=Path('stderr'))
+    resources: typing.Mapping[str, typing.Any] = dataclasses.field(default_factory=dict)
 
 
 # TODO: input data typing.
@@ -72,7 +70,7 @@ class SubprocessInput:
     # TODO: Move input documentation to Input class docs.
     argv: typing.Sequence[str]
     inputs: typing.Mapping[str, Path] = dataclasses.field(default_factory=dict)
-    outputs: typing.Mapping[str, OutputFile] = dataclasses.field(default_factory=dict)
+    outputs: typing.Mapping[str, Path] = dataclasses.field(default_factory=dict)
     stdin: typing.Iterable[str] = ()
     environment: typing.Mapping[str, typing.Union[str, None]] = dataclasses.field(default_factory=dict)
     # For now, let's just always enable stdout/stderr
@@ -150,13 +148,9 @@ class Subprocess:
         # model and to allow for future contextual information, such as shape.
         return SubprocessTask()
 
-    # TODO: Remove identity parameter. It should be calculated.
-    def __init__(self, input: SubprocessInput, identity=None):
+    def __init__(self, input: SubprocessInput):
         self._bound_input = input
         self._result = None
-        self._uid = identity
-        if self._uid is None:
-            self._uid = next_monotonic_integer().to_bytes(32, 'big')
 
     def input_collection(self):
         return self._bound_input
@@ -168,7 +162,11 @@ class Subprocess:
         ...
 
     def identity(self):
-        return self._uid
+        # Make a fake 256-bit digest.
+        value = b'\x00'*32
+        if not len(value) == 256//8:
+            raise ProtocolError('UID is supposed to be a 256-bit hash digest.')
+        return value
 
     def serialize(self) -> str:
         """Encode the task as a JSON record.
@@ -373,7 +371,6 @@ def executable(*args, context=None, **kwargs):
     # workflow editing context. We could either block on acquiring the editor
     # context, use an async context manager, or hide the possible async
     # aspect by letting the return value of the director be awaitable.
-    # TODO: This would be more readable in a form like workflow.add_item(Subprocess, bound_input)
 
     try:
         task_view = director(input=bound_input)

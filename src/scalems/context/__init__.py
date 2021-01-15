@@ -19,7 +19,7 @@ of a contextvars.copy_context().run(). scalems will try to flag misuse by raisin
 a ProtocolError, but please be sensible.
 """
 
-__all__ = ['WorkflowManager']
+__all__ = ['WorkflowManager', 'get_context', 'scope']
 
 import abc
 import asyncio
@@ -40,7 +40,7 @@ from scalems.core.exceptions import MissingImplementationError
 from scalems.core.exceptions import ProtocolError
 from scalems.core.exceptions import ScaleMSError
 from scalems.core.exceptions import ScopeError
-from scalems.core.support.serialization import Encoder
+from scalems.core.support.serialization import encode
 
 logger = logging.getLogger(__name__)
 logger.debug('Importing {}'.format(__name__))
@@ -136,7 +136,7 @@ class ItemView:
 
     """
 
-    def uid(self) -> bytes:
+    def identity(self) -> bytes:
         """Get the canonical unique identifier for this task.
 
         The identifier is universally unique and can be used to query any
@@ -158,7 +158,7 @@ class ItemView:
         context = self._context()
         if context is None:
             raise ScopeError('Out of scope. Managing context no longer exists!')
-        return context.task_map[self.uid()].done()
+        return context.task_map[self.identity()].done()
 
     def result(self):
         """Get a local object of the tasks's result type.
@@ -172,14 +172,14 @@ class ItemView:
         # TODO: What is the public interface to the task_map or completion status?
         # Note: We want to keep the View object as lightweight as possible, such
         # as storing just the weak ref to the manager, and the item identifier.
-        return context.task_map[self.uid()].result()
+        return context.task_map[self.identity()].result()
 
     def description(self) -> Description:
         """Get a description of the resource type."""
         context = self._context()
         if context is None:
             raise ScopeError('Out of scope. Managing context no longer exists!')
-        return context.task_map[self.uid()].description()
+        return context.task_map[self.identity()].description()
 
     def __getattr__(self, item):
         """Proxy attribute accessor for special task members.
@@ -194,18 +194,18 @@ class ItemView:
         context = self._context()
         if context is None:
             raise ScopeError('Out of scope. Managing context no longer available!')
-        task = context.task_map[self.uid()]  # type: Task
+        task = context.task_map[self.identity()]  # type: Task
         try:
             return getattr(task, item)
         except KeyError as e:
             raise
 
-    def __init__(self, context, uid: bytes):
+    def __init__(self, context, identity: bytes):
         self._context = weakref.ref(context)
-        if isinstance(uid, bytes) and len(uid) == 32:
-            self._uid = uid
+        if isinstance(identity, bytes) and len(identity) == 32:
+            self._uid = identity
         else:
-            raise ProtocolError(f'uid should be a 32-byte binary digest (bytes). Got {uid}')
+            raise ProtocolError(f'identity should be a 32-byte binary digest (bytes). Got {identity}')
 
 
 class WorkflowView:
@@ -284,7 +284,7 @@ class Task:
         value = Description(resource_type=resource_type, shape=shape)
         return value
 
-    def uid(self) -> bytes:
+    def identity(self) -> bytes:
         if not isinstance(self._uid, bytes):
             raise InternalError('Task._uid was stored as bytes. Implementation changed?')
         return bytes(self._uid)
@@ -310,7 +310,7 @@ class Task:
         self._serialized_record = str(record)
         decoded_record = json.loads(self._serialized_record)
 
-        self._uid = bytes.fromhex(decoded_record['uid'])
+        self._uid = bytes.fromhex(decoded_record['identity'])
         if not len(self._uid) == 256 // 8:
             raise ProtocolError('UID is supposed to be a 256-bit hash digest. Got {}'.format(repr(self._uid)))
         self._done = asyncio.Event()
@@ -325,7 +325,7 @@ class Task:
             raise ProtocolError('Result is already set for {}.'.format(repr(self)))
         self._result = result
         self._done.set()
-        logger.debug('Result set for {} in {}'.format(self.uid().hex(), str(self._context())))
+        logger.debug('Result set for {} in {}'.format(self.identity().hex(), str(self._context())))
 
     # @classmethod
     # def deserialize(cls, context, record: str):
@@ -421,6 +421,7 @@ class WorkflowManager(abc.ABC):
     # TODO: Consider a threading.Lock for editing permissions.
     # TODO: Consider asyncio.Lock instances for non-thread-safe state updates during execution and dispatching.
 
+    # Note potential confusion with collections.abc.Mapping interface, and see "to do" below.
     def item(self, identifier) -> ItemView:
         """Access an item in the managed workflow.
         """
@@ -432,10 +433,13 @@ class WorkflowManager(abc.ABC):
         ))
         if identifier not in self.task_map:
             raise KeyError(f'WorkflowManager does not have item {identifier}')
-        item_view = ItemView(context=self, uid=identifier)
+        item_view = ItemView(context=self, identity=identifier)
 
         return item_view
 
+    # TODO: Consider a pattern that looks more like the concurrency patterns for
+    #       negotiating unique access, and allow the workflow manager interface
+    #       to look more like Mapping or MutableMapping.
     @contextlib.contextmanager
     def edit_item(self, identifier) -> Task:
         """Scoped workflow item editor.
@@ -524,14 +528,14 @@ class WorkflowManager(abc.ABC):
         if not isinstance(task_description, (Subprocess, dict)):
             raise MissingImplementationError('Operation not supported.')
 
-        if hasattr(task_description, 'uid'):
-            uid: bytes = task_description.uid()
-            if uid in self.task_map:
+        if hasattr(task_description, 'identity'):
+            identity: bytes = task_description.identity()
+            if identity in self.task_map:
                 # TODO: Consider decreasing error level to `warning`.
                 raise DuplicateKeyError('Task already present in workflow.')
             logger.debug('Adding {} to {}'.format(str(task_description), str(self)))
             record = {
-                'uid': uid.hex(),
+                'identity': identity.hex(),
                 'type': task_description.resource_type().scoped_identifier(),
                 'input': {}
             }
@@ -545,22 +549,22 @@ class WorkflowManager(abc.ABC):
                     raise InternalError('Unexpected missing field.') from e
         else:
             assert isinstance(task_description, dict)
-            assert 'uid' in task_description
-            uid = task_description['uid']
+            assert 'identity' in task_description
+            identity = task_description['identity']
             implementation_identifier = task_description.get('implementation', None)
             if not isinstance(implementation_identifier, list):
                 raise DispatchError('Bug: bad schema checking?')
 
-            if uid in self.task_map:
+            if identity in self.task_map:
                 # TODO: Consider decreasing error level to `warning`.
                 raise DuplicateKeyError('Task already present in workflow.')
             logger.debug('Adding {} to {}'.format(str(task_description), str(self)))
             record = {
-                'uid': uid.hex(),
+                'identity': identity.hex(),
                 'type': tuple(implementation_identifier),
                 'input': task_description
             }
-        serialized_record = json.dumps(record, cls=Encoder)
+        serialized_record = json.dumps(record, default=encode)
 
         # TODO: Make sure there are no artifacts of shallow copies that may result in a user modifying nested objects unexpectedly.
         item = Task(self, serialized_record)
@@ -570,9 +574,9 @@ class WorkflowManager(abc.ABC):
 
         # TODO: Provide a data descriptor and possibly a more formal Workflow class.
         # We do not yet check that the derived classes actually initialize self.task_map.
-        self.task_map[uid] = item
+        self.task_map[identity] = item
 
-        task_view = ItemView(context=self, uid=uid)
+        task_view = ItemView(context=self, identity=identity)
 
         # TODO: Register task factory (dependent on executor).
         # TODO: Register input factory (dependent on dispatcher and task factory / executor).

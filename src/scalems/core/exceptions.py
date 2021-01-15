@@ -26,6 +26,10 @@ class InternalError(ScaleMSError):
     """
 
 
+class APIError(ScaleMSError):
+    """Specified interfaces are being violated."""
+
+
 class DispatchError(ScaleMSError):
     """SCALE-MS is unable to execute work or manage data in the requested environment."""
 

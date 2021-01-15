@@ -65,14 +65,14 @@ class ImmediateExecutionContext(scalems.context.WorkflowManager):
         #     raise ValueError('Only scalems.subprocess.SubprocessInput objects supported as input.')
         if not isinstance(task_description, scalems.subprocess.Subprocess):
             raise MissingImplementationError('Operation not supported.')
-        uid = task_description.uid()
-        if uid in self.task_map:
+        identity = task_description.identity()
+        if identity in self.task_map:
             # TODO: Consider decreasing error level to `warning`.
             raise DuplicateKeyError('Task already present in workflow.')
         # TODO: use generic reference to implementation.
-        self.task_map[uid] = operations.executable(context=self, task=task_description)
+        self.task_map[identity] = operations.executable(context=self, task=task_description)
         # TODO: The return value should be a full proxy to a command instance.
-        return uid
+        return identity
 
     def run(self, task):
         # If task belongs to this context, it has already run: no-op.

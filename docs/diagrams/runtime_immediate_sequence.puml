@@ -26,7 +26,7 @@ end box
 [-> context: deserialize node
 activate context
 
-context -> node_builder **: get_node_builder(uid, inputs)
+context -> node_builder **: get_node_builder(identity, inputs)
 activate node_builder
 context -> node_director ++
 

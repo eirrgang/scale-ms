@@ -52,25 +52,25 @@ end box
         "referents"= [
             {
                 "label": "input_files",
-                "uid": "aaaa...",
+                "identity": "aaaa...",
                 "type": ["scalems", "Mapping"],
                 "data": [{"-i"= ["infile"]}]
             },
             {
                 "label": "output_files",
-                "uid": "bbbb...",
+                "identity": "bbbb...",
                 "type": ["scalems", "Mapping"],
                 "data": [{"-o"= ["outfile"]}]
             },
             {
                 "label": "resource_spec",
-                "uid": "cccc...",
+                "identity": "cccc...",
                 "type": ["scalems", "Mapping"],
                 "data": []
             },
             {
                 "label": "subprocess_input",
-                "uid": "dddd...",
+                "identity": "dddd...",
                 "type": ["scalems", "SubprocessInput"],
                 "args": ["myprogram", "--num_threads", "8"],
                 "inputs": "aaaa...",
@@ -81,7 +81,7 @@ end box
             },
             {
                 "label"= "command",
-                "uid"= "eeee...",
+                "identity"= "eeee...",
                 "type"= ["scalems", "Subprocess"],
                 "input"= "dddd...",
                 "result"= "eeee..."
@@ -95,7 +95,7 @@ end box
    framework -> context ++: deserialize node
 
 
-    context -> node_builder **: get_node_builder(uid, inputs)
+    context -> node_builder **: get_node_builder(identity, inputs)
     activate node_builder
     context -> node_director ++
 

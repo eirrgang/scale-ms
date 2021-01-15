@@ -27,9 +27,12 @@ objects on the program side to un-annotated strings in the serialized data
 Document prototype::
 
     {
-        "version": "scalems_workflow_1",
+        'schema': {
+            'spec': 'scalems_0',
+            'name': 'Workflow'
+        },
         "types": {},
-        "referents": []
+        "items": []
     }
 
 ``types`` member keys conform to the :token:`typeIdentifier` grammar.
@@ -45,19 +48,19 @@ ResourceDescription prototype::
         "shape": []
     }
 
-``referents`` elements represent nodes in a directed acyclic graph (DAG) of
+``items`` elements represent nodes in a directed acyclic graph (DAG) of
 resources and data flow dependencies.
 To allow error checking during deserialization,
-``referents`` elements must occur in a topologically valid sequence.
+``items`` elements must occur in a topologically valid sequence.
 Otherwise, the sequence is not specified.
 For a sequence to be topologically valid, any references encountered in a
-``referents`` element must be resolvable by the WorkFlowContext manager to an
+``items`` element must be resolvable by the WorkFlowContext manager to an
 "immutable" resource definition.
 (Sequences may be trivially pre-validated in the serialized document by
-confirming that ``referents`` elements do not occur after they have been referenced.)
-Elements are objects containing at least a ``uid`` and ``type`` key.
+confirming that ``items`` elements do not occur after they have been referenced.)
+Elements are objects containing at least a ``identity`` and ``type`` key.
 Other allowed or required keys are determined by the type specification.
-The ``uid`` member conforms to the :token:`uid` grammar.
+The ``identity`` member conforms to the :token:`identity` grammar.
 ``type`` holds a :term:`Resource Type Identifier` array.
 The ``label`` key is reserved for an (optional) string conforming to the :token:`label` grammar.
 Additional members are keyed with :token:`label` grammar.
@@ -108,11 +111,11 @@ contiguous blocks 'a' - 'z' and 'A' - 'Z').
 
 
 .. productionlist:: reference
-    reference: `uid` ["." nestedlabel]
+    reference: `identity` ["." nestedlabel]
     nestedlabel: `label` [`subscript`] ["." nestedlabel]
 
 .. productionlist:: UID
-    uid: 64(DIGIT | [A-F])
+    identity: 64(DIGIT | [A-F])
 
 .. productionlist:: Type Identifier
     implementation: `objectname`
@@ -237,28 +240,28 @@ value descriptions of Mappings.
                 "result" = { "type"= ["scalems", "SubprocessResult"], "shape"= [1] }
             },
         },
-        "referents"= [
+        "items"= [
             {
                 "label"= "input_files",
-                "uid"= "aaaa...",
+                "identity"= "aaaa...",
                 "type"= ["scalems", "Mapping"],
                 "data"= [{"-i"= ["infile"]}]
             },
             {
                 "label"= "output_files",
-                "uid"= "bbbb...",
+                "identity"= "bbbb...",
                 "type"= ["scalems", "Mapping"],
                 "data"= [{"-o"= ["outfile"]}]
             },
             {
                 "label"= "resource_spec",
-                "uid"= "cccc...",
+                "identity"= "cccc...",
                 "type"= ["scalems", "Mapping"],
                 "data"= [{"ncpus"= 8, "launch_method"= ["exec"]}]
             },
             {
                 "label"= "subprocess_input",
-                "uid"= "dddd...",
+                "identity"= "dddd...",
                 "type"= ["scalems", "SubprocessInput"],
                 "args"= ["myprogram", "--num_threads", "8"],
                 "inputs"= "aaaa...",
@@ -269,7 +272,7 @@ value descriptions of Mappings.
             },
             {
                 "label"= "command",
-                "uid"= "eeee...",
+                "identity"= "eeee...",
                 "type"= ["scalems", "Subprocess"],
                 "input"= "dddd...",
                 "result"= "eeee..."

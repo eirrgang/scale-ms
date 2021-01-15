@@ -36,7 +36,7 @@ end box
    framework -> context ++: deserialize node
 
 
-    context -> node_builder **: get_node_builder(uid, inputs)
+    context -> node_builder **: get_node_builder(identity, inputs)
     activate node_builder
     context -> node_director ++
 

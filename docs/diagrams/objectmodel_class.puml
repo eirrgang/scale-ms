@@ -1,24 +1,6 @@
 @startuml
-abstract Object {
-    identifier
-    schema
-    type
-}
-
-abstract Schema {
-    spec: string
-    name: string
-}
-
-abstract Identifier {
-    {abstract} bytes()
-    {abstract} hex()
-    {abstract} name: ScopedName
-}
-
-abstract ScopedName {
-    tuple()
-    delimited_string()
+abstract Object <<Mapping>> {
+    {abstract} identifier
 }
 
 abstract class ResourceType {

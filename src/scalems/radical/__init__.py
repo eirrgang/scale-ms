@@ -130,14 +130,14 @@ class RPWorkflowContext(scalems.context.WorkflowManager):
         # TODO: more complete type hinting.
         if not isinstance(task_description, scalems.subprocess.Subprocess):
             raise MissingImplementationError('Operation not supported.')
-        uid = task_description.uid()
-        if uid in self.task_map:
+        identity = task_description.identity()
+        if identity in self.task_map:
             # TODO: Consider decreasing error level to `warning`.
             raise DuplicateKeyError('Task already present in workflow.')
 
         task = operations.executable(self, task_description)
 
-        self.task_map[uid] = task
+        self.task_map[identity] = task
         return task
 
     async def run(self, task=None):
@@ -229,10 +229,10 @@ class RPFuture(concurrent.futures.Future):
     def result(self, timeout: Optional[float] = ...) -> RPResult:
         if not self.done():
             # Note that task.wait() seems not to work reliably.
-            # TODO: task.umgr.wait_units(uids=taskid)
+            # TODO: task.umgr.wait_units(identitys=taskid)
             # Warning: Waiting on all units will deadlock in non-trivial cases.
             task = self.task()
-            task.umgr.wait_units(uids=task.uid, timeout=timeout)
+            task.umgr.wait_units(identitys=task.identity, timeout=timeout)
         return super().result()
 
     def set_running_or_notify_cancel(self) -> bool:

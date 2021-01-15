@@ -9,4 +9,5 @@ with compatible external software.
 ..  toctree::
     :maxdepth: 2
 
+    datamodel
     serialization

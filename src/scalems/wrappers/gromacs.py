@@ -61,7 +61,7 @@ def _executable(argv: Sequence[str],
     input_node = {
         # Static properties.
         'object_type': 'ExecutableInput',
-        'uid': _next_uid().hex(),
+        'identity': _next_uid().hex(),
         # Fields may have dependencies.
         'data': {
             'argv': list(argv),
@@ -71,19 +71,19 @@ def _executable(argv: Sequence[str],
         }
     }
     # Results are self-referential until a concrete result is available.
-    input_node['result'] = input_node['uid']
+    input_node['result'] = input_node['identity']
 
     task_node: dict = {
         # Static properties.
         'object_type': 'Executable',
-        'uid': _next_uid().hex(),
+        'identity': _next_uid().hex(),
         'data': {
             'stdout': 'stdout.txt',
             'stderr': 'stderr.txt',
         },
         # Fields may have dependencies.
         'input': {
-            'ExecutableInput': input_node['uid'],
+            'ExecutableInput': input_node['identity'],
             'resources': dict(**resources),
             # The files produced by a program may depend on the inputs, so this is
             # not static. We will archive the whole working directory, but we can
@@ -92,21 +92,21 @@ def _executable(argv: Sequence[str],
             'output': list(outputs),
         },
     }
-    task_node['result'] = task_node['uid']
+    task_node['result'] = task_node['identity']
 
     output_node: dict = {
         'object_type': 'ExecutableOutput',
-        'uid': _next_uid().hex(),
+        'identity': _next_uid().hex(),
         'input': {
             # Explicit dependency that is not (yet) resolved in terms of data flow.
-            'depends': task_node['uid'],
+            'depends': task_node['identity'],
             # Fields with dependencies, though not evident in this example.
             'outputs': list(outputs),
             'stdout': stdout,
             'stderr': stderr
         },
     }
-    output_node['result'] = output_node['uid']
+    output_node['result'] = output_node['identity']
 
     return {
         'implementation': ['scalems', 'wrappers', 'gromacs', 'Executable'],
@@ -123,6 +123,10 @@ except ImportError:
     _gmx_cli_entry_point = None
 if _gmx_cli_entry_point is None:
     _gmx_cli_entry_point = 'gmx'
+
+
+class SimulationInput:
+    ...
 
 
 # TODO: Implicit ensemble handling requires type annotations.
